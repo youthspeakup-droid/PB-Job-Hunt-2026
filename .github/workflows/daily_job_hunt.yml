@@ -1,0 +1,45 @@
+name: PB Job Hunt
+
+on:
+  schedule:
+    # 07:00 UTC, Mon–Fri = 08:00 London during BST (Mar–Oct).
+    # During GMT (Oct–Mar) the run will fire at 07:00 London. Adjust if you mind.
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:   # lets you trigger it manually from the Actions tab
+
+permissions:
+  contents: write      # required so the workflow can commit the updated report back
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run job agent
+        env:
+          REED_API_KEY:   ${{ secrets.REED_API_KEY }}
+          ADZUNA_APP_ID:  ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+        run: python job_agent.py
+
+      - name: Commit updated report
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html seen_jobs.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Daily job hunt: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          else
+            echo "No changes to commit."
+          fi
