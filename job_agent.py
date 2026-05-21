@@ -95,6 +95,7 @@ def search_reed(keyword: str, location: str) -> list:
         for j in r.json().get("results", []):
             lo, hi = j.get("minimumSalary"), j.get("maximumSalary")
             salary = f"£{int(lo):,}–£{int(hi):,}" if lo else "Not disclosed"
+            raw_desc = j.get("jobDescription", "")
             jobs.append({
                 "id":          f"reed_{j['jobId']}",
                 "title":       j.get("jobTitle", ""),
@@ -104,7 +105,8 @@ def search_reed(keyword: str, location: str) -> list:
                 "url":         j.get("jobUrl", ""),
                 "posted":      (j.get("date") or "")[:10],
                 "source":      "Reed",
-                "description": clean(j.get("jobDescription", "")),
+                "description": clean(raw_desc),
+                "_full_desc":  clean(raw_desc, 8000),
             })
         return jobs
     except Exception as e:
@@ -126,6 +128,7 @@ def search_indeed(keyword: str, location: str) -> list:
             jid = entry.get("id", entry.link)
             if "jk=" in jid:
                 jid = jid.split("jk=")[-1].split("&")[0]
+            raw_desc = entry.get("summary", "")
             jobs.append({
                 "id":          f"indeed_{jid}",
                 "title":       entry.get("title", ""),
@@ -135,7 +138,8 @@ def search_indeed(keyword: str, location: str) -> list:
                 "url":         entry.get("link", ""),
                 "posted":      (entry.get("published") or "")[:10],
                 "source":      "Indeed",
-                "description": clean(entry.get("summary", "")),
+                "description": clean(raw_desc),
+                "_full_desc":  clean(raw_desc, 8000),
             })
         return jobs
     except Exception as e:
@@ -161,6 +165,7 @@ def search_adzuna(keyword: str, location: str) -> list:
         for j in r.json().get("results", []):
             lo, hi = j.get("salary_min"), j.get("salary_max")
             salary = f"£{int(lo):,}–£{int(hi):,}" if lo else "Not disclosed"
+            raw_desc = j.get("description", "")
             jobs.append({
                 "id":          f"adzuna_{j['id']}",
                 "title":       j.get("title", ""),
@@ -170,7 +175,8 @@ def search_adzuna(keyword: str, location: str) -> list:
                 "url":         j.get("redirect_url", ""),
                 "posted":      (j.get("created") or "")[:10],
                 "source":      "Adzuna",
-                "description": clean(j.get("description", "")),
+                "description": clean(raw_desc),
+                "_full_desc":  clean(raw_desc, 8000),
             })
         return jobs
     except Exception as e:
@@ -183,9 +189,16 @@ def is_relevant_title(title: str) -> bool:
     return any(term in t for term in RELEVANCE_TERMS)
 
 
+def mentions_ifrs_or_gaap(text: str) -> bool:
+    """True if the text contains the word IFRS or GAAP (case-insensitive,
+    whole-word match so we don't trip on accidental substrings)."""
+    return bool(re.search(r"\b(ifrs|gaap)\b", text or "", re.IGNORECASE))
+
+
 def collect_all_jobs() -> list:
     bucket: dict = {}
-    dropped = 0
+    dropped_title = 0
+    dropped_ifrs  = 0
     for keyword in KEYWORDS:
         for location in LOCATIONS[:2]:   # London + Stevenage is enough
             for job in (
@@ -194,11 +207,21 @@ def collect_all_jobs() -> list:
                 + search_adzuna(keyword, location)
             ):
                 if not is_relevant_title(job.get("title", "")):
-                    dropped += 1
+                    dropped_title += 1
+                    continue
+                # Check the FULL description (not the 300-char display snippet)
+                # for an IFRS or GAAP reference. Drop the job if neither appears.
+                full_desc = job.pop("_full_desc", job.get("description", ""))
+                if not mentions_ifrs_or_gaap(full_desc):
+                    dropped_ifrs += 1
                     continue
                 if job["id"] not in bucket:
                     bucket[job["id"]] = job
-    print(f"  Collected {len(bucket)} unique jobs (filtered out {dropped} off-topic results)")
+    print(
+        f"  Collected {len(bucket)} unique jobs "
+        f"(filtered out {dropped_title} off-topic titles, "
+        f"{dropped_ifrs} without IFRS/GAAP in description)"
+    )
     return list(bucket.values())
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -658,13 +681,21 @@ def main():
     seen = load_seen()
     print(f"  Previously seen: {len(seen)} jobs")
 
-    # Retroactively prune off-topic entries that were saved by an earlier
-    # version of the script (before the title-relevance filter existed).
+    # Retroactively prune entries saved by earlier versions of the script:
+    #   1. Off-topic titles (no accounting / reporting / IFRS / controller word)
+    #   2. Descriptions that don't mention IFRS or GAAP
+    # For (2) we only have the stored 300-char display snippet to look at, so
+    # this can be a bit aggressive — anything legitimate that gets cleared
+    # will simply be re-fetched next run if it's still live.
     before = len(seen)
-    seen = {jid: j for jid, j in seen.items() if is_relevant_title(j.get("title", ""))}
+    seen = {
+        jid: j for jid, j in seen.items()
+        if is_relevant_title(j.get("title", ""))
+        and mentions_ifrs_or_gaap(j.get("description", ""))
+    }
     pruned = before - len(seen)
     if pruned:
-        print(f"  Pruned {pruned} off-topic entries from seen_jobs.json")
+        print(f"  Pruned {pruned} stale / off-topic entries from seen_jobs.json")
 
     print("Searching Reed, Indeed, Adzuna…")
     all_jobs = collect_all_jobs()
