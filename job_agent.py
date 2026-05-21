@@ -40,6 +40,20 @@ LOCATIONS      = ["London", "City of London", "Stevenage", "Hertfordshire"]
 MIN_SALARY     = 80000
 DISTANCE_MILES = 35
 
+# Title-relevance filter. Reed, Indeed and Adzuna all do loose word-level
+# matching across title+description, which lets unrelated "Manager" roles
+# slip through. We require the JOB TITLE to contain at least one of these
+# terms (case-insensitive) before keeping the result.
+RELEVANCE_TERMS = [
+    "accounting",
+    "accountant",
+    "reporting",
+    "ifrs",
+    "controller",
+    "consolidation",
+    "financial control",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths — all files stay in the same folder as this script
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,8 +178,14 @@ def search_adzuna(keyword: str, location: str) -> list:
         return []
 
 
+def is_relevant_title(title: str) -> bool:
+    t = (title or "").lower()
+    return any(term in t for term in RELEVANCE_TERMS)
+
+
 def collect_all_jobs() -> list:
     bucket: dict = {}
+    dropped = 0
     for keyword in KEYWORDS:
         for location in LOCATIONS[:2]:   # London + Stevenage is enough
             for job in (
@@ -173,9 +193,12 @@ def collect_all_jobs() -> list:
                 + search_indeed(keyword, location)
                 + search_adzuna(keyword, location)
             ):
+                if not is_relevant_title(job.get("title", "")):
+                    dropped += 1
+                    continue
                 if job["id"] not in bucket:
                     bucket[job["id"]] = job
-    print(f"  Collected {len(bucket)} unique jobs")
+    print(f"  Collected {len(bucket)} unique jobs (filtered out {dropped} off-topic results)")
     return list(bucket.values())
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -634,6 +657,14 @@ def main():
 
     seen = load_seen()
     print(f"  Previously seen: {len(seen)} jobs")
+
+    # Retroactively prune off-topic entries that were saved by an earlier
+    # version of the script (before the title-relevance filter existed).
+    before = len(seen)
+    seen = {jid: j for jid, j in seen.items() if is_relevant_title(j.get("title", ""))}
+    pruned = before - len(seen)
+    if pruned:
+        print(f"  Pruned {pruned} off-topic entries from seen_jobs.json")
 
     print("Searching Reed, Indeed, Adzuna…")
     all_jobs = collect_all_jobs()
