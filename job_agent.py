@@ -65,7 +65,15 @@ REPORT_FILE = BASE / "index.html"   # GitHub Pages serves this as the home page
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def load_seen() -> dict:
-    return json.loads(SEEN_FILE.read_text()) if SEEN_FILE.exists() else {}
+    if not SEEN_FILE.exists():
+        return {}
+    try:
+        text = SEEN_FILE.read_text().strip()
+        return json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        # File is empty or corrupted — start fresh instead of crashing.
+        print("  seen_jobs.json was empty or invalid; starting fresh")
+        return {}
 
 def save_seen(seen: dict):
     SEEN_FILE.write_text(json.dumps(seen, indent=2, default=str))
@@ -215,6 +223,9 @@ def collect_all_jobs() -> list:
                 if not mentions_ifrs_or_gaap(full_desc):
                     dropped_ifrs += 1
                     continue
+                # Persist the full description so future runs can re-verify
+                # without re-fetching the source.
+                job["description_full"] = full_desc
                 if job["id"] not in bucket:
                     bucket[job["id"]] = job
     print(
@@ -681,21 +692,32 @@ def main():
     seen = load_seen()
     print(f"  Previously seen: {len(seen)} jobs")
 
-    # Retroactively prune entries saved by earlier versions of the script:
-    #   1. Off-topic titles (no accounting / reporting / IFRS / controller word)
-    #   2. Descriptions that don't mention IFRS or GAAP
-    # For (2) we only have the stored 300-char display snippet to look at, so
-    # this can be a bit aggressive — anything legitimate that gets cleared
-    # will simply be re-fetched next run if it's still live.
+    # Retroactively prune entries saved by earlier versions of the script.
+    #
+    # We only filter on TITLE here, not on IFRS/GAAP. Reason: older entries
+    # only have the 300-char display snippet of the description stored, and
+    # IFRS/GAAP is very often mentioned LATER in a job description than the
+    # first 300 chars — so filtering retroactively on the stored snippet
+    # would drop legitimate roles. From this version onward we save the
+    # full description (see collect_all_jobs), so a future retroactive
+    # IFRS/GAAP check on new entries would be reliable.
+    before = len(seen)
+    seen = {jid: j for jid, j in seen.items() if is_relevant_title(j.get("title", ""))}
+    pruned = before - len(seen)
+    if pruned:
+        print(f"  Pruned {pruned} off-topic entries from seen_jobs.json")
+
+    # Apply the IFRS/GAAP filter retroactively ONLY to entries that have a
+    # full description stored (saved by this version of the script onward).
     before = len(seen)
     seen = {
         jid: j for jid, j in seen.items()
-        if is_relevant_title(j.get("title", ""))
-        and mentions_ifrs_or_gaap(j.get("description", ""))
+        if "description_full" not in j
+        or mentions_ifrs_or_gaap(j.get("description_full", ""))
     }
     pruned = before - len(seen)
     if pruned:
-        print(f"  Pruned {pruned} stale / off-topic entries from seen_jobs.json")
+        print(f"  Pruned {pruned} entries without IFRS/GAAP in full description")
 
     print("Searching Reed, Indeed, Adzuna…")
     all_jobs = collect_all_jobs()
